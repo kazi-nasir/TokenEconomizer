@@ -338,6 +338,15 @@ applied to the ones that follow. Facts and the deny list take effect when a sess
 loop guard acts during a turn. Each agent learns on its own (what Claude Code learned in a
 repository is not used by Codex there), while settings are shared by every agent.
 
+It does not start from nothing. On Claude Code, the first session in a repository also reads, in
+the background, that repository's sessions Claude Code saved before the plugin was installed
+(under `~/.claude/projects`, or `$CLAUDE_CONFIG_DIR/projects`), oldest first, and learns from
+each as if it had just finished: facts, the tools they used, and how long their turns ran for the
+loop guard. A later session start says how many it read. Each is read once; one still being
+written (another window) waits until it has been quiet for ten minutes. With micro-skills on, the
+fact proposer runs at most once over all of them. `history=off` learns only from new sessions;
+`te history --dry-run` lists what it would read.
+
 - **Facts** (once you turn micro-skills on; it is off by default). Two sources propose them, in
   any language or toolchain. The first needs no model call: the same environment failure in a few
   sessions (a tool, interpreter, build or test command that fails as typed and works spelled
@@ -397,6 +406,7 @@ repository is not used by Codex there), while settings are shared by every agent
 | `config` | the settings: what is on, and every value in effect |
 | `config set KEY=VALUE … [--global]` | change settings for this repository (or every one); see [Settings](#settings) |
 | `config unset KEY … [--global]` | remove the setting at this level, so the global value (or the default) applies |
+| `history` / `history --dry-run` | learn now from this repository's sessions saved before the plugin was installed / list them (the first session start does it by itself) |
 | `repomap` / `repomap refresh` | the cached repository map / make it now (see [Repository map](#repository-map)) |
 | `repos` | every repository it keeps state for: how it was identified, its sessions per agent, the checkouts seen |
 | `repos migrate` | file state an earlier version recorded under the repository it belongs to (runs by itself, once, after an upgrade) |
@@ -474,6 +484,8 @@ and are shared by every agent working in it. The examples use Claude Code's form
 | `toolprune_sessions` | `5` | or this many sessions, however few prompts they ran |
 | `toolprune_quiet_minutes` | `60` | how long the repository's sessions must have been idle before `auto` writes a deny list, so that no conversation resumed while its prompt cache is warm loses it (a list is written at the latest a day after it formed); `0` writes at once |
 | `toolprune_protect` | none | tools never left out however long they go unused, by name or pattern (`mcp__headroom__*`), separated by commas; a deny rule the plugin added for one is removed at the next fold, and rules you wrote are never touched |
+| `history` | `on` | learn from the repository's sessions saved before the plugin was installed (Claude Code); `off` learns only from sessions run with it |
+| `history_max_sessions` | `200` | how many of those, the most recent |
 | `loopguard_aggr` | `default` | the guard's threshold preset: `conservative`, `default` or `aggressive` |
 | `loopguard_nudges` | `1` | redirects per turn before the guard only tells you |
 | `loopguard.<name>` | from the preset | one guard threshold, set by hand (below) |

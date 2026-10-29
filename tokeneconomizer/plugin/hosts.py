@@ -38,6 +38,7 @@ named `rollout-*`; Copilot's session-state transcript, or no transcript at all i
 hook process; Claude Code otherwise. Each plugin hook file except Claude Code's also passes
 `--host` explicitly, so detection is the fallback rather than the rule.
 """
+import glob
 import json
 import os
 import re
@@ -190,6 +191,17 @@ class Host:
     def tool_usage(self, trace_path):
         return trace.tool_usage(trace_path)
 
+    # -- sessions saved before the plugin was installed (`history`) ----------------------
+    def history_transcripts(self, env):
+        """[(session_id, path)] of every session log this agent keeps on disk, whatever its
+        repository; [] where the plugin cannot read them."""
+        return []
+
+    def prompt_turns(self, transcript_path):
+        """The session's prompt-turns (`trace.claude_prompt_turns`), or None where the log does
+        not say them."""
+        return None
+
 
 def _failure_response(p):
     """A PostToolUseFailure payload's `error` as a response; None for any other payload. A
@@ -257,6 +269,19 @@ class ClaudeCode(Host):
 
     def tool_usage(self, trace_path):
         return trace.claude_tool_usage(os.path.realpath(trace_path))
+
+    def history_transcripts(self, env):
+        # `<config dir>/projects/<cwd, slugged>/<session id>.jsonl`; a session's subagents
+        # write under `<session id>/subagents/`, one level down, and are not sessions.
+        home = env.get("CLAUDE_CONFIG_DIR") or os.path.join(
+            env.get("USERPROFILE") or env.get("HOME") or os.path.expanduser("~"), ".claude")
+        out = []
+        for path in glob.glob(os.path.join(home, "projects", "*", "*.jsonl")):
+            out.append((os.path.splitext(os.path.basename(path))[0], path))
+        return out
+
+    def prompt_turns(self, transcript_path):
+        return trace.claude_prompt_turns(transcript_path)
 
 
 _CODEX_SHELL = {"bash", "shell", "exec_command", "local_shell", "unified_exec",

@@ -32,7 +32,10 @@ def overhead_total(overhead):
 
 def summarize(records):
     """Aggregate ledger records into the numbers `te status` prints."""
-    sessions = [r for r in records if r.get("kind") == "session"]
+    # A session saved before the plugin was installed is learned from, not run under it: it
+    # would only dilute the plugin's overhead share, so it is counted on its own.
+    history = [r for r in records if r.get("kind") == "session" and r.get("history")]
+    sessions = [r for r in records if r.get("kind") == "session" and not r.get("history")]
     priced = [r for r in sessions if isinstance(r.get("effective_tokens"), (int, float))]
     exec_total = sum(r["effective_tokens"] for r in priced)
     # `overhead` records are paid calls charged as they happened (the background stuck judge),
@@ -50,6 +53,7 @@ def summarize(records):
         "aborts": sum(int(r.get("aborts") or 0) for r in sessions),
         "turns": sum(int(r.get("turns") or 0) for r in sessions),
         "injected_sessions": sum(1 for r in sessions if r.get("injected_chars")),
+        "history_sessions": len(history),
     }
 
 

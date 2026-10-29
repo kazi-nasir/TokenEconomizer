@@ -91,6 +91,52 @@ def claude_prompt_count(transcript_path):
     return n
 
 
+def claude_prompt_turns(transcript_path):
+    """A Claude Code session's prompt-turns, as the loop guard saw them live: per prompt the
+    person gave (`_is_prompt`), its main-conversation tool calls in order as
+    `(name, args, result_text, ok)`, and whether the person interrupted it. A subagent's calls
+    are not the turn's own (the guard skips them live too)."""
+    turns, cur, by_id = [], None, {}
+    for line in _lines(transcript_path):
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if (not isinstance(ev, dict) or ev.get("type") not in CONVERSATION
+                or ev.get("isSidechain")):
+            continue
+        if _is_prompt(ev):
+            cur = {"calls": [], "interrupted": False}
+            turns.append(cur)
+            continue
+        content = (ev.get("message") or {}).get("content")
+        if cur is None:
+            continue
+        if isinstance(content, str):
+            content = [{"type": "text", "text": content}]
+        if not isinstance(content, list):
+            continue
+        for b in content:
+            if not isinstance(b, dict):
+                continue
+            if b.get("type") == "tool_use" and b.get("id") not in by_id:
+                call = [b.get("name") or "", b.get("input") or {}, "", True]
+                by_id[b.get("id")] = call
+                cur["calls"].append(call)
+            elif b.get("type") == "tool_result" and b.get("tool_use_id") in by_id:
+                c = b.get("content")
+                if isinstance(c, list):
+                    c = " ".join(x.get("text", "") for x in c if isinstance(x, dict))
+                call = by_id[b["tool_use_id"]]
+                call[2], call[3] = (c if isinstance(c, str) else ""), not b.get("is_error", False)
+            elif (ev.get("type") == "user" and b.get("type") == "text"
+                  and str(b.get("text", "")).startswith("[Request interrupted")):
+                cur["interrupted"] = True
+    for t in turns:
+        t["calls"] = [tuple(c) for c in t["calls"]]
+    return turns
+
+
 
 def claude_subagent_files(transcript_path):
     """Subagent transcripts of a Claude Code session: `<dir>/<session-id>/subagents/*.jsonl`."""

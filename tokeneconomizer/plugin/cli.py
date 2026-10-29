@@ -16,6 +16,9 @@
                                       `loopguard.min_turns=12` (this repository; `--global` for
                                       every repository)
     te config unset KEY ...           back to the next source down (the global file, then default)
+    te history [--dry-run]            learn now from this repository's sessions the agent saved
+                                      before the plugin was installed (the first session start
+                                      does it, detached; `--dry-run` lists them)
     te repomap [show | refresh]       the repository map (`repomap=on`): what is cached, or
                                       make it now
     te repos                          every repository with state here: how it was identified,
@@ -42,7 +45,8 @@ import sys
 import time
 
 from .. import loopguard
-from . import accounting, denylist, fold, hosts, paths, repomap, repos, sidecall, toolcheck
+from . import (accounting, denylist, fold, history, hosts, paths, repomap, repos, sidecall,
+               toolcheck)
 from .config import canonical, unset_config, write_config
 from .context import LiveContext
 from .paths import state_root
@@ -130,6 +134,7 @@ def cmd_status(args):
                                                       ctx.host.name)},
         "loopguard": {"mode": cfg.loopguard, "envelope": env_tracker.envelope,
                       "ended_green_turns": len(env_tracker.resolved_turns)},
+        "history": {"mode": cfg.history, **(ctx.store.read(history.MARKER) or {})},
         "ledger": ledger})
     if args.json:
         print(json.dumps(out, indent=2, default=str))
@@ -154,6 +159,14 @@ def cmd_status(args):
           f"{accounting.fmt_tokens(ledger['effective_tokens'])} effective tokens, plugin "
           f"overhead {accounting.fmt_tokens(ledger['overhead_tokens'])} "
           f"({ledger['overhead_frac']:.1%})")
+    h = out["history"]
+    if cfg.history == "off":
+        print("  history      off: learning only from sessions run with the plugin")
+    elif h.get("finished"):
+        print(f"  history      {h.get('sessions', 0)} earlier session(s) saved before the plugin "
+              f"learned from" + (f", {len(h['waiting'])} waiting" if h.get("waiting") else ""))
+    else:
+        print("  history      not read yet (the next session start reads it; or `te history`)")
     i = out["microskills"]
     print(f"  microskills  {i['injected_lines']} fact(s) injected at session start "
           f"({i['sessions_folded']} sessions learned from)")
@@ -513,6 +526,24 @@ def cmd_fold(args):
     return 0
 
 
+def cmd_history(args):
+    ctx = _ctx(args)
+    if args.dry_run:
+        ready, waiting = history.candidates(ctx, exclude=args.exclude or ())
+        for sid, path in ready:
+            print(f"{sid}  {path}")
+        for sid, path in waiting:
+            print(f"{sid}  {path}  (still being written; waits)")
+        print(f"{len(ready)} earlier session(s) of {ctx.repo.label} to learn from"
+              + (f", {len(waiting)} waiting" if waiting else ""))
+        return 0
+    m = history.run(ctx, exclude=args.exclude or ())
+    print(f"learned from {m['sessions']} earlier session(s) of {ctx.repo.label} "
+          f"({m['turns']} prompt-turns replayed into the loop guard)"
+          + (f"; {len(m['waiting'])} still being written, folded later" if m["waiting"] else ""))
+    return 0
+
+
 def cmd_judge(args):
     """The detached half of the stuck judge (see plugin/judge.py); not for people."""
     from . import judge
@@ -735,6 +766,10 @@ def build_parser():
     p.add_argument("--session", action="append")
     p.add_argument("--verbose", action="store_true")
     p.set_defaults(fn=cmd_fold)
+    p = add("history")
+    p.add_argument("--exclude", action="append")
+    p.add_argument("--dry-run", action="store_true")
+    p.set_defaults(fn=cmd_history)
     p = add("judge")
     p.add_argument("--session", required=True)
     p.add_argument("--job", required=True)

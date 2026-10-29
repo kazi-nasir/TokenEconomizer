@@ -24,10 +24,11 @@ import shutil
 import tempfile
 import time
 
-from .. import trace
+from .. import loopguard, trace
 from . import accounting, denylist, sidecall
 from . import adapter as live_adapter
 from .adapter import LiveAdapter, load_catalog
+from .hosts import _EXIT_RE, RESULT_CAP
 
 STALE_S = 600           # an unfolded session whose transcript is quiet this long is over
 # A fold never runs in a hook -- it is a detached process, or `te fold` -- so it can wait for
@@ -63,7 +64,7 @@ def _run_dir(workdir, trace_path):
     return run
 
 
-def _fold_microskills(ctx, adapter, run_dir, session_id, injected=None):
+def _fold_microskills(ctx, adapter, run_dir, session_id, injected=None, paid=True):
     profile = ctx.config.microskills
     if profile == "off":
         return None
@@ -74,9 +75,10 @@ def _fold_microskills(ctx, adapter, run_dir, session_id, injected=None):
                            max_facts=ctx.config.microskills_max_facts,
                            max_tokens=ctx.config.microskills_max_tokens)
     # Paused once the host's CLI said it is not signed in (`sidecall.paused`): the free layer
-    # still learns.
+    # still learns. Without `paid` (a history fold before the last), the proposer's window
+    # fills and its clock runs, and the next fold that may call a model proposes over it.
     runner = (sidecall.runner_for(ctx.host.name, ctx.config)
-              if icfg.paid and not sidecall.paused(ctx.host.name, ctx.root) else None)
+              if paid and icfg.paid and not sidecall.paused(ctx.host.name, ctx.root) else None)
     stage = PrefixStage(icfg, ctx.repo.label, ctx.mech_dir, False, runner=runner,
                         optimizer_model="agent", adapter=adapter, agent=ctx.host.name)
     srow = {"resolved": None}
@@ -355,8 +357,38 @@ def schedule_pending(ctx):
 CODEX_HIGH_RISK = frozenset({"image_media"})
 
 
-def fold_session(ctx, session_id, transcript_path=None):
-    """Fold one finished session. Returns the ledger record, or None if already folded."""
+def _replay_turns(ctx, transcript):
+    """A history session's prompt-turns into the loop guard's envelope, as the live hooks would
+    have recorded them (`LiveController.post_tool` and `stop`): each call folded with no judge,
+    and only a turn that was not interrupted counted. Returns the turns counted."""
+    if ctx.config.loopguard == "off":
+        return 0
+    turns = ctx.host.prompt_turns(transcript) or []
+    n = 0
+    for t in turns:
+        if t.get("interrupted") or not t.get("calls"):
+            continue
+        tracker = loopguard.load_envelope(ctx.store, level=ctx.config.loopguard_aggr,
+                                          overrides=ctx.config.loopguard_thresholds)
+        thr = loopguard.thresholds(tracker, ctx.config.loopguard_thresholds)
+        g = loopguard.TurnGuard()
+        for name, args, text, ok in t["calls"]:
+            text = (text or "")[:RESULT_CAP]
+            m = None if ok else _EXIT_RE.search(text[:400])
+            g.fold(name, args, text, int(m.group(1)) if m else None,
+                   envelope=tracker.envelope, thr=thr, nudge_budget=ctx.config.loopguard_nudges)
+        loopguard.record_turn(ctx.store, g, level=ctx.config.loopguard_aggr,
+                              overrides=ctx.config.loopguard_thresholds)
+        n += 1
+    return n
+
+
+def fold_session(ctx, session_id, transcript_path=None, paid=True, history=False):
+    """Fold one finished session. Returns the ledger record, or None if already folded.
+
+    `history`: a session saved before the plugin was installed (`history`), which no hook saw:
+    its prompt-turns are replayed into the loop guard's envelope here, and its record says so.
+    `paid=False` keeps the micro-skills proposer from calling a model for this one."""
     sess_name = os.path.join("sessions", f"{session_id}.json")
     with ctx.store.locked("fold", timeout=FOLD_LOCK_WAIT_S) as got:
         if not got:
@@ -370,6 +402,8 @@ def fold_session(ctx, session_id, transcript_path=None):
                   "repo": ctx.repo.label, "folded_at": time.time(),
                   "started": sess.get("started"), "ended": sess.get("ended"),
                   "shadow": ctx.config.shadow}
+        if history:
+            record["history"] = True
         workdir = tempfile.mkdtemp(prefix="te-fold-")
         try:
             trace_path = ctx.host.mechanism_trace(transcript, workdir) if transcript else None
@@ -387,13 +421,15 @@ def fold_session(ctx, session_id, transcript_path=None):
                                       protect=ctx.config.toolprune_protect)
                 with ctx.store.locked("mechanisms"):
                     inj = _fold_microskills(ctx, adapter, run_dir, session_id,
-                                            injected=sess.get("injected_ids"))
+                                            injected=sess.get("injected_ids"), paid=paid)
                     # A session that ran no prompt is no evidence about the tools.
                     unt = None if prompts == 0 else _fold_toolprune(
                         ctx, adapter, run_dir, session_id, transcript=transcript,
                         workdir=workdir, prompts=prompts)
                 record["injection"] = inj
                 record["untool"] = unt
+                if history:
+                    record["replayed_turns"] = _replay_turns(ctx, transcript)
                 if unt and unt.get("pending"):
                     schedule_pending(ctx)
                 ctx.host.settle(transcript)

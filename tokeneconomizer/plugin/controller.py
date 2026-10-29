@@ -2,7 +2,9 @@
 
     SessionStart      inject the repository's micro-skills (cached by the last fold), and
                       fold any earlier session that ended without its SessionEnd being seen;
-                      with `repomap` on, refresh a stale map in the background
+                      the first time in a repository, fold the sessions the agent saved
+                      before the plugin was installed (`history`); with `repomap` on, refresh
+                      a stale map in the background
     UserPromptSubmit  open a prompt-turn for the loop guard; on a session's first prompt, add
                       the repository map (`repomap=on`)
     PostToolUse       fold the call into the turn's guard; a redirect when it first says the
@@ -24,7 +26,7 @@ import os
 import time
 
 from .. import loopguard
-from . import denylist, fold, repomap, repos, sidecall
+from . import denylist, fold, history, repomap, repos, sidecall
 from .hosts import merge_outputs
 from .paths import ensure_launcher
 
@@ -150,6 +152,15 @@ class LiveController:
                 f"again."))
             seen["sidecall_paused"] = pause["at"]
 
+        hist = self.store.read(history.MARKER) or {}
+        if (hist.get("sessions") and seen.get("history") != hist["sessions"]
+                and not self.cfg.shadow):
+            outputs.append(self.host.notice(
+                f"TokenEconomizer: learned from {hist['sessions']} earlier session(s) of "
+                f"{self.ctx.repo.label} saved before it was installed (`{self._cmd('status')}`; "
+                f"`{self._cmd('config')} set history=off` to learn only from new sessions)."))
+            seen["history"] = hist["sessions"]
+
         note = repos.migration_notice(self.ctx.root, self._cmd("repos"))
         if note and not self.cfg.shadow:
             outputs.append(self.host.notice(note))
@@ -170,6 +181,8 @@ class LiveController:
         repos.prune_pins(self.ctx.root, self.host.name)
         repos.start_migration(self.ctx)
         fold.spawn_fold(self.ctx, fold.pending_sessions(self.ctx, exclude=(self.sid,)))
+        if history.needed(self.ctx):
+            history.spawn(self.ctx, exclude=(self.sid,))
         return merge_outputs(*outputs)
 
     def _toolprune_notices(self, seen):
